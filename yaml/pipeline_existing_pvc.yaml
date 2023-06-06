@@ -1,0 +1,247 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: first-pipeline
+  annotations:
+    tekton.dev/output_artifacts: '{"decision-tree-classifier": [{"key": "artifacts/$PIPELINERUN/decision-tree-classifier/Accuracy.tgz",
+      "name": "decision-tree-classifier-Accuracy", "path": "/tmp/outputs/Accuracy/data"}],
+      "download-data-function": [{"key": "artifacts/$PIPELINERUN/download-data-function/Data.tgz",
+      "name": "download-data-function-Data", "path": "/tmp/outputs/Data/data"}], "logistic-regression-classifier":
+      [{"key": "artifacts/$PIPELINERUN/logistic-regression-classifier/Accuracy.tgz",
+      "name": "logistic-regression-classifier-Accuracy", "path": "/tmp/outputs/Accuracy/data"}]}'
+    tekton.dev/input_artifacts: '{"decision-tree-classifier": [{"name": "download-data-function-Data",
+      "parent_task": "download-data-function"}], "logistic-regression-classifier":
+      [{"name": "download-data-function-Data", "parent_task": "download-data-function"}],
+      "show-results": [{"name": "decision-tree-classifier-Accuracy", "parent_task":
+      "decision-tree-classifier"}, {"name": "logistic-regression-classifier-Accuracy",
+      "parent_task": "logistic-regression-classifier"}]}'
+    tekton.dev/artifact_bucket: mlpipeline
+    tekton.dev/artifact_endpoint: minio-service.kubeflow:9000
+    tekton.dev/artifact_endpoint_scheme: http://
+    tekton.dev/artifact_items: '{"decision-tree-classifier": [["Accuracy", "$(results.Accuracy.path)"]],
+      "download-data-function": [["Data", "$(workspaces.download-data-function.path)/artifacts/$ORIG_PR_NAME/$(context.taskRun.name)/Data"]],
+      "logistic-regression-classifier": [["Accuracy", "$(results.Accuracy.path)"]],
+      "show-results": []}'
+    sidecar.istio.io/inject: "false"
+    tekton.dev/template: ''
+    pipelines.kubeflow.org/big_data_passing_format: $(workspaces.$TASK_NAME.path)/artifacts/$ORIG_PR_NAME/$TASKRUN_NAME/$TASK_PARAM_NAME
+    pipelines.kubeflow.org/pipeline_spec: '{"description": "Applies Decision Tree
+      and Logistic Regression for classification problem.", "name": "First Pipeline"}'
+  labels:
+    pipelines.kubeflow.org/pipelinename: ''
+    pipelines.kubeflow.org/generation: ''
+spec:
+  pipelineSpec:
+    tasks:
+    - name: download-data-function
+      taskSpec:
+        steps:
+        - name: main
+          command:
+          - python
+          - download_data.py
+          - --data
+          - $(workspaces.download-data-function.path)/artifacts/$ORIG_PR_NAME/$(context.taskRun.name)/Data
+          image: fernandolpz/only-tests:download_data_v3
+          env:
+          - name: ORIG_PR_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['custom.tekton.dev/originalPipelineRun']
+        - image: busybox
+          name: output-taskrun-name
+          command:
+          - sh
+          - -ec
+          - echo -n "$(context.taskRun.name)" > "$(results.taskrun-name.path)"
+        - image: busybox
+          name: copy-results-artifacts
+          command:
+          - sh
+          - -ec
+          - |
+            set -exo pipefail
+            TOTAL_SIZE=0
+            copy_artifact() {
+            if [ -d "$1" ]; then
+              tar -czvf "$1".tar.gz "$1"
+              SUFFIX=".tar.gz"
+            fi
+            ARTIFACT_SIZE=`wc -c "$1"${SUFFIX} | awk '{print $1}'`
+            TOTAL_SIZE=$( expr $TOTAL_SIZE + $ARTIFACT_SIZE)
+            touch "$2"
+            if [[ $TOTAL_SIZE -lt 3072 ]]; then
+              if [ -d "$1" ]; then
+                tar -tzf "$1".tar.gz > "$2"
+              elif ! awk "/[^[:print:]]/{f=1} END{exit !f}" "$1"; then
+                cp "$1" "$2"
+              fi
+            fi
+            }
+            copy_artifact $(workspaces.download-data-function.path)/artifacts/$ORIG_PR_NAME/$(context.taskRun.name)/Data $(results.Data.path)
+          onError: continue
+          env:
+          - name: ORIG_PR_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['custom.tekton.dev/originalPipelineRun']
+        results:
+        - name: Data
+          type: string
+          description: /tmp/outputs/Data/data
+        - name: taskrun-name
+          type: string
+        metadata:
+          labels:
+            pipelines.kubeflow.org/cache_enabled: "true"
+          annotations:
+            pipelines.kubeflow.org/component_spec_digest: '{"name": "Download Data
+              Function", "outputs": [{"description": "Path where data will be stored.",
+              "name": "Data", "type": "LocalPath"}], "version": "Download Data Function@sha256=bc65ba7d39d9d4987fbf6502f0d04b8eeed2be72e61c7f492155bb79c8bc1ad9"}'
+        workspaces:
+        - name: download-data-function
+      workspaces:
+      - name: download-data-function
+        workspace: first-pipeline
+    - name: decision-tree-classifier
+      params:
+      - name: download-data-function-trname
+        value: $(tasks.download-data-function.results.taskrun-name)
+      taskSpec:
+        steps:
+        - name: main
+          command:
+          - python
+          - decision_tree.py
+          - --data
+          - $(workspaces.decision-tree-classifier.path)/artifacts/$ORIG_PR_NAME/$(params.download-data-function-trname)/Data
+          - --accuracy
+          - $(results.Accuracy.path)
+          image: fernandolpz/only-tests:decision_tree_v3
+          env:
+          - name: ORIG_PR_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['custom.tekton.dev/originalPipelineRun']
+        params:
+        - name: download-data-function-trname
+        results:
+        - name: Accuracy
+          type: string
+          description: /tmp/outputs/Accuracy/data
+        metadata:
+          labels:
+            pipelines.kubeflow.org/cache_enabled: "true"
+          annotations:
+            pipelines.kubeflow.org/component_spec_digest: '{"name": "Decision Tree
+              classifier", "outputs": [{"description": "Accuracy metric", "name":
+              "Accuracy", "type": "Float"}], "version": "Decision Tree classifier@sha256=6ef07d0a7bd8ac169d87ba2c034d405892209a33e0baa8fbeb95bbf6bc60d98c"}'
+        workspaces:
+        - name: decision-tree-classifier
+      workspaces:
+      - name: decision-tree-classifier
+        workspace: first-pipeline
+      runAfter:
+      - download-data-function
+    - name: logistic-regression-classifier
+      params:
+      - name: download-data-function-trname
+        value: $(tasks.download-data-function.results.taskrun-name)
+      taskSpec:
+        steps:
+        - name: main
+          command:
+          - python
+          - logistic_regression.py
+          - --data
+          - $(workspaces.logistic-regression-classifier.path)/artifacts/$ORIG_PR_NAME/$(params.download-data-function-trname)/Data
+          - --accuracy
+          - $(results.Accuracy.path)
+          image: fernandolpz/only-tests:logistic_regression_v2
+          env:
+          - name: ORIG_PR_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['custom.tekton.dev/originalPipelineRun']
+        params:
+        - name: download-data-function-trname
+        results:
+        - name: Accuracy
+          type: string
+          description: /tmp/outputs/Accuracy/data
+        metadata:
+          labels:
+            pipelines.kubeflow.org/cache_enabled: "true"
+          annotations:
+            pipelines.kubeflow.org/component_spec_digest: '{"name": "Logistic Regression
+              Classifier", "outputs": [{"description": "Accuracy metric", "name":
+              "Accuracy", "type": "Float"}], "version": "Logistic Regression Classifier@sha256=79a4df73f415137d44a81b65a789d368369dd930308e3a9a1529bc129a4c0d49"}'
+        workspaces:
+        - name: logistic-regression-classifier
+      workspaces:
+      - name: logistic-regression-classifier
+        workspace: first-pipeline
+      runAfter:
+      - download-data-function
+    - name: show-results
+      params:
+      - name: decision-tree-classifier-Accuracy
+        value: $(tasks.decision-tree-classifier.results.Accuracy)
+      - name: logistic-regression-classifier-Accuracy
+        value: $(tasks.logistic-regression-classifier.results.Accuracy)
+      taskSpec:
+        steps:
+        - name: main
+          args:
+          - --decision-tree
+          - $(inputs.params.decision-tree-classifier-Accuracy)
+          - --logistic-regression
+          - $(inputs.params.logistic-regression-classifier-Accuracy)
+          command:
+          - sh
+          - -ec
+          - |
+            program_path=$(mktemp)
+            printf "%s" "$0" > "$program_path"
+            python3 -u "$program_path" "$@"
+          - |
+            def show_results(decision_tree, logistic_regression):
+                # Given the outputs from decision_tree and logistic regression components
+                # the results are shown.
+
+                print(f"Decision tree (accuracy): {decision_tree}")
+                print(f"Logistic regression (accuracy): {logistic_regression}")
+
+            import argparse
+            _parser = argparse.ArgumentParser(prog='Show results', description='')
+            _parser.add_argument("--decision-tree", dest="decision_tree", type=float, required=True, default=argparse.SUPPRESS)
+            _parser.add_argument("--logistic-regression", dest="logistic_regression", type=float, required=True, default=argparse.SUPPRESS)
+            _parsed_args = vars(_parser.parse_args())
+
+            _outputs = show_results(**_parsed_args)
+          image: python:3.7
+        params:
+        - name: decision-tree-classifier-Accuracy
+        - name: logistic-regression-classifier-Accuracy
+        metadata:
+          labels:
+            pipelines.kubeflow.org/cache_enabled: "true"
+          annotations:
+            pipelines.kubeflow.org/component_spec_digest: '{"name": "Show results",
+              "outputs": [], "version": "Show results@sha256=a6db0dad3390f73d00c754ec421dd2d4113a50cc371ce346926b2a621dd6899a"}'
+    workspaces:
+    - name: first-pipeline
+  workspaces:
+  - name: first-pipeline
+    persistentVolumeClaim:
+      claimName: hf-cos-pvc
+  #- name: first-pipeline
+  #  volumeClaimTemplate:
+  #    spec:
+  #      storageClassName: ibmc-s3fs-cos-perf
+  #      secret-name: hf-cos-write-access
+  #      accessModes:
+  #      - ReadWriteMany
+  #      resources:
+  #        requests:
+  #          storage: 20Gi
